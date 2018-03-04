@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 from torch import nn
 import cv2
-
+import os
 def convRelu(i, batchNormalization=False, leakyRelu=False):
     nc = 1
     ks = [3, 3, 3, 3, 3, 3, 2]
@@ -22,8 +22,7 @@ def convRelu(i, batchNormalization=False, leakyRelu=False):
     cnn.add_module('conv{0}'.format(i),
                    nn.Conv2d(nIn, nOut, ks[i], ss[i], ps[i]))
     if batchNormalization:
-        cnn.add_module('batchnorm{0}'.format(i), nn.InstanceNorm2d(nOut))
-        # cnn.add_module('batchnorm{0}'.format(i), nn.BatchNorm2d(nOut))
+        cnn.add_module('batchnorm{0}'.format(i), nn.BatchNorm2d(nOut))
     if leakyRelu:
         cnn.add_module('relu{0}'.format(i),
                        nn.LeakyReLU(0.2, inplace=True))
@@ -79,8 +78,6 @@ class GridGen(Module):
         self.grid[:,:,0] = np.expand_dims(np.repeat(np.expand_dims(np.arange(self.width)+0.5, 0), repeats = self.height, axis = 0), 0)
         self.grid[:,:,1] = np.expand_dims(np.repeat(np.expand_dims(np.arange(self.height)+0.5, 0), repeats = self.width, axis = 0).T, 0)
 
-        # self.grid[:,:,0] = np.expand_dims(np.repeat(np.expand_dims(np.linspace(-1, 1, self.height), 0), repeats = self.width, axis = 0).T, 0)
-        # self.grid[:,:,1] = np.expand_dims(np.repeat(np.expand_dims(np.linspace(-1, 1, self.width), 0), repeats = self.height, axis = 0), 0)
         self.grid[:,:,2] = np.ones([self.height, width])
         self.grid = Variable(torch.from_numpy(self.grid.astype(np.float32)), requires_grad=False)
 
@@ -112,15 +109,15 @@ def resample_from_pts(img, pts):
         renorm = compute_renorm_matrix(img)
         pts = torch.cat([
             pts,
-            Variable(torch.ones(pts.size(0), 1, 4))
+            Variable(torch.ones(pts.size(0), 1, 4)).cuda()
         ], dim=1)
 
         pts = renorm[None,...].matmul(pts)
 
         output_grid_size = 28
-        t = np.linspace(0.0, 1.0, num=output_grid_size)[:,None].astype(np.float32)
+        t = ((np.arange(output_grid_size)+0.5)/output_grid_size)[:,None].astype(np.float32)
         t = np.repeat(t,axis=1, repeats=output_grid_size)
-        t = Variable(torch.from_numpy(t), requires_grad=False)
+        t = Variable(torch.from_numpy(t), requires_grad=False).cuda()
         s = t.t()
 
         t = t[:,:,None]
@@ -168,11 +165,12 @@ class RandomMNISTPosition(object):
             [0,  0,  1]
         ])
 
-        theta = np.random.uniform(-.7, .7)
+        #theta = np.random.uniform(-.7, .7)
+        theta = np.random.uniform(-np.pi, np.pi)
         rotate = torch.Tensor([
             [ np.cos(theta), np.sin(theta), 0],
             [-np.sin(theta), np.cos(theta), 0],
-            [                0,                0, 1]
+            [             0,             0, 1]
         ])
 
         s = np.random.uniform(0.5, 0.7)
@@ -226,63 +224,100 @@ if __name__ == "__main__":
                            RandomMNISTPosition()
                            # transforms.Normalize((0.1307,), (0.3081,))
                        ])),
-        batch_size=32, shuffle=True)
+        batch_size=128, shuffle=True, drop_last=True)
 
-    cnn = PointRegression()
-    pt_loss = nn.MSELoss()
+    test_loader = torch.utils.data.DataLoader(
+        datasets.MNIST('mnist_data', train=False, download=True,
+                       transform=transforms.Compose([
+                           transforms.ToTensor(),
+                           RandomMNISTPosition()
+                           # transforms.Normalize((0.1307,), (0.3081,))
+                       ])),
+        batch_size=128, shuffle=False, drop_last=True)
+
+
+    cnn = PointRegression().cuda()
+    pt_loss = nn.MSELoss().cuda()
 
     optimizer = torch.optim.Adam(cnn.parameters(), lr=1e-3)
 
-
-    for x in train_loader:
-        img = x[0][0]
-        target_pts = x[0][1]
-        target_label = x[1]
-
-
-
-        img = Variable(img, requires_grad=False)
-        target_pts = Variable(target_pts, requires_grad=False)
-
-        pred_pts = cnn(img)
-        loss = pt_loss(pred_pts, target_pts)
-
-        resampled = resample_from_pts(img, pred_pts)
-        target_resampled = resample_from_pts(img, target_pts)
-
-        img = img.data.cpu().numpy()[0,0]
-        img = (255*img).astype(np.uint8)
-        cv2.imwrite("input.png", img)
-
-        #Not sure why the image is transposed
-        img = resampled.data.cpu().numpy()[0,0].T
-        img = (255*img).astype(np.uint8)
-        cv2.imwrite("output.png", img)
-        img = target_resampled.data.cpu().numpy()[0,0].T
-        img = (255*img).astype(np.uint8)
-        cv2.imwrite("target.png", img)
-
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        print loss.data[0]
+    lowest_test_loss = float('inf')
+    for epoch in xrange(1000):
+        cnn.train()
+        training_losses = []
+        for x in train_loader:
+            img = x[0][0]
+            target_pts = x[0][1]
+            target_label = x[1]
 
 
 
-    # output_grid_size = 32
-    # t = np.linspace(0.0, 1.0, num=32)[:,None].astype(np.float32)
-    # t = np.repeat(t,axis=1, repeats=32)
-    # t = Variable(torch.from_numpy(t), requires_grad=False)
-    # s = t.t()
-    #
-    # t = t[:,:,None]
-    # s = s[:,:,None]
-    #
-    # interpolations = torch.cat([
-    #     (1-t)*s,
-    #     (1-t)*(1-s),
-    #     t*s,
-    #     t*(1-s),
-    # ], dim=-1)
+            img = Variable(img, requires_grad=False).cuda()
+            target_pts = Variable(target_pts, requires_grad=False).cuda()
+
+            pred_pts = cnn(img)
+            loss = pt_loss(pred_pts, target_pts)
+            '''
+            resampled = resample_from_pts(img, pred_pts)
+            target_resampled = resample_from_pts(img, target_pts)
+            img = img.data.cpu().numpy()[0,0]
+            img = (255*img).astype(np.uint8)
+            cv2.imwrite("input.png", img)
+
+            #Not sure why the image is transposed
+            img = resampled.data.cpu().numpy()[0,0].T
+            img = (255*img).astype(np.uint8)
+            cv2.imwrite("output.png", img)
+            img = target_resampled.data.cpu().numpy()[0,0].T
+            img = (255*img).astype(np.uint8)
+            cv2.imwrite("target.png", img)
+            '''
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            training_losses.append(loss.data[0])
+
+        print "Training Loss", np.mean(training_losses)
+        cnn.eval()
+        test_losses = []
+        for x in test_loader:
+            img = x[0][0]
+            target_pts = x[0][1]
+            target_label = x[1]
+
+
+            img = Variable(img, requires_grad=False, volatile=True).cuda()
+            target_pts = Variable(target_pts, requires_grad=False, volatile=True).cuda()
+
+            pred_pts = cnn(img)
+            loss = pt_loss(pred_pts, target_pts)
+            test_losses.append(loss.data[0])
+
+        test_loss = np.mean(test_losses)
+        if lowest_test_loss > test_loss:
+            lowest_test_loss = test_loss
+
+
+            resampled = resample_from_pts(img, pred_pts)
+            target_resampled = resample_from_pts(img, target_pts)
+
+            if not os.path.exists("test_samples"):
+                os.makedirs("test_samples")
+
+            for i in xrange(img.size(0)):
+                im = img.data.cpu().numpy()[i,0]
+                im = (255*im).astype(np.uint8)
+                cv2.imwrite("test_samples/{}_input.png".format(i), im)
+
+                #Not sure why the image is transposed
+                im = resampled.data.cpu().numpy()[i,0].T
+                im = (255*im).astype(np.uint8)
+                cv2.imwrite("test_samples/{}_output.png".format(i), im)
+                im = target_resampled.data.cpu().numpy()[i,0].T
+                im = (255*im).astype(np.uint8)
+                cv2.imwrite("test_samples/{}_target.png".format(i), im)
+
+
+        print "Test Loss", test_loss
